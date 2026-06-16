@@ -11,12 +11,12 @@ const app = express();
 app.use(express.json());
 const PORT = 5000;
 
-// Free models tried in order — if one is rate-limited the next is used
+// Free models tried in order — if one fails the next is used automatically
 const FREE_MODELS = [
-  "deepseek/deepseek-chat-v3-0324:free",
   "meta-llama/llama-3.3-70b-instruct:free",
-  "mistralai/mistral-7b-instruct:free",
   "google/gemini-2.0-flash-exp:free",
+  "qwen/qwen3-235b-a22b:free",
+  "mistralai/mistral-7b-instruct:free",
 ];
 
 function getAI(): OpenAI {
@@ -34,6 +34,14 @@ function getAI(): OpenAI {
   });
 }
 
+function shouldTryNextModel(err: any): boolean {
+  // Retry on: rate limit, service unavailable, model not found / no longer free
+  const s = err?.status;
+  const msg: string = err?.error?.message || err?.message || '';
+  return s === 429 || s === 503 || s === 404 ||
+    msg.includes('rate') || msg.includes('unavailable') || msg.includes('free');
+}
+
 async function withFallback<T>(
   fn: (ai: OpenAI, model: string) => Promise<T>
 ): Promise<T> {
@@ -43,15 +51,13 @@ async function withFallback<T>(
     try {
       return await fn(ai, model);
     } catch (err: any) {
-      const isRateLimit = err?.status === 429 || err?.status === 503;
-      if (isRateLimit) {
-        console.warn(`Model ${model} rate-limited, trying next...`);
+      if (shouldTryNextModel(err)) {
+        console.warn(`Model ${model} unavailable (${err?.status}), trying next...`);
         lastError = err;
-        // Brief pause before trying next model
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 300));
         continue;
       }
-      throw err; // Non-rate-limit errors bubble up immediately
+      throw err; // Auth errors etc. bubble up immediately
     }
   }
   throw lastError;
