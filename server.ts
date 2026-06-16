@@ -2,8 +2,7 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
-import { randomUUID } from "crypto";
+import OpenAI from "openai";
 import { SYSTEM_PROMPT } from "./src/lib/assistantSystemPrompt.js";
 
 dotenv.config();
@@ -12,58 +11,40 @@ const app = express();
 app.use(express.json());
 const PORT = 5000;
 
-// Initialize Gemini
-let aiInstance: GoogleGenAI | null = null;
+const MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 
-function getAI(): GoogleGenAI {
-  if (!aiInstance) {
-    const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("Gemini API key not configured. Please set GEMINI_API_KEY.");
-    }
-    aiInstance = new GoogleGenAI({ apiKey });
+function getAI(): OpenAI {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENROUTER_API_KEY is not set.");
   }
-  return aiInstance;
+  return new OpenAI({
+    apiKey,
+    baseURL: "https://openrouter.ai/api/v1",
+    defaultHeaders: {
+      "HTTP-Referer": "https://replit.com",
+      "X-Title": "CU Policy Editor",
+    },
+  });
 }
 
 function parseApiError(error: any): string {
   const status = error.status;
   const raw = error.message || '';
 
-  // Gemini wraps errors as nested JSON strings — unwrap them
-  try {
-    const outer = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || '');
-    const innerStr = outer?.error?.message ?? '';
-    try {
-      const inner = JSON.parse(innerStr);
-      if (inner?.error?.message) return inner.error.message;
-    } catch {}
-    if (innerStr) return innerStr;
-  } catch {}
-
-  if (status === 429 || raw.includes('429') || raw.includes('quota')) {
-    return 'API quota exceeded. Please wait a moment and try again.';
+  if (status === 429 || raw.includes('429') || raw.includes('quota') || raw.includes('rate limit')) {
+    return 'Rate limit reached. Please wait a moment and try again.';
   }
-  if (status === 503 || raw.includes('503') || raw.includes('high demand') || raw.includes('UNAVAILABLE')) {
-    return 'Gemini is temporarily experiencing high demand. Please try again in a few seconds.';
+  if (status === 503 || raw.includes('503') || raw.includes('unavailable')) {
+    return 'The AI model is temporarily unavailable. Please try again in a few seconds.';
   }
-  if (status === 401 || raw.includes('401') || raw.includes('API_KEY') || raw.includes('API key')) {
-    return 'Invalid or missing API key. Please check your GEMINI_API_KEY configuration.';
+  if (status === 401 || raw.includes('401') || raw.includes('API key') || raw.includes('Unauthorized')) {
+    return 'Invalid or missing API key. Please check your OPENROUTER_API_KEY configuration.';
+  }
+  if (status === 402 || raw.includes('402') || raw.includes('credits') || raw.includes('billing')) {
+    return 'Insufficient credits on OpenRouter. Please top up your account at openrouter.ai.';
   }
   return raw || 'An unexpected error occurred. Please try again.';
-}
-
-async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
-  try {
-    return await fn();
-  } catch (error: any) {
-    if (retries > 0 && (error.status === 503 || error.status === 429)) {
-      console.warn(`Gemini API call failed with ${error.status}. Retrying in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return withRetry(fn, retries - 1, delay * 2);
-    }
-    throw error;
-  }
 }
 
 // In-Memory Database
@@ -100,20 +81,18 @@ app.get("/api/applications", (req, res) => {
 });
 
 app.post("/api/applications", (req, res) => {
-  const newApp = {
+  const newApp: any = {
     id: `APP${String(mockDb.applications.length).padStart(9, '0')}`,
     ...req.body,
-    status: "REVIEW_PENDING", 
+    status: "REVIEW_PENDING",
     submittedAt: new Date().toLocaleString()
   };
-  
-  // Simple risk scoring simulation
+
   newApp.fraud_propensity_score = Math.random() * 0.3;
   newApp.approval_strength_score = 500 + Math.random() * 250;
   newApp.policy_decision_score = newApp.approval_strength_score * 0.9;
   newApp.policy_readiness = newApp.policy_decision_score + 10;
-  
-  // Execute gate rules based on current mockDb rules
+
   if (newApp.fraud_propensity_score > mockDb.rules.eligibility.fraudBound) {
     newApp.status = "AUTO_DENIED";
     newApp.risk_band = "HIGH";
@@ -134,125 +113,132 @@ app.get("/api/metrics", (req, res) => {
   res.json(mockDb.metrics);
 });
 
-
-
-// API routes go here FIRST
+// What-If Plan endpoint
 app.post("/api/whatif-plan", async (req, res) => {
   try {
     const ai = getAI();
     const { message, basePolicy } = req.body;
-    
+
     const planPrompt = `You are an expert Credit Union Underwriting Knowledge Assistant.
-    The user wants to do a what-if analysis on the decision rules.
-    Base Policy JSON: ${JSON.stringify(basePolicy)}
-    User Request: "${message}"
+The user wants to do a what-if analysis on the decision rules.
+Base Policy JSON: ${JSON.stringify(basePolicy)}
+User Request: "${message}"
 
-    Return ONLY a valid JSON object with the following structure:
+Return ONLY a valid JSON object with the following structure:
+{
+  "intent": "Short summary of the user's goal",
+  "summary": "High level summary of the proposed changes",
+  "changes": [
     {
-      "intent": "Short summary of the user's goal",
-      "summary": "High level summary of the proposed changes",
-      "changes": [
-        {
-          "gate": "Gate ID or Name",
-          "segment": "Segment Name",
-          "field": "Rule/Condition Name",
-          "before": "Old value",
-          "after": "New value",
-          "rationale": "Why this change",
-          "citedModules": ["Module A"]
-        }
-      ],
-      "expectedDirection": "String describing expected tradeoff",
-      "clarifyingQuestion": "If the user request is ambiguous, ask a question. Or leave empty if clear.",
-      "draftPolicy": { ... modified policy object ONLY if changes made ... }
+      "gate": "Gate ID or Name",
+      "segment": "Segment Name",
+      "field": "Rule/Condition Name",
+      "before": "Old value",
+      "after": "New value",
+      "rationale": "Why this change",
+      "citedModules": ["Module A"]
     }
-    Never propose prohibited-basis variables. If requested, refuse and set clarifyingQuestion instead.`;
+  ],
+  "expectedDirection": "String describing expected tradeoff",
+  "clarifyingQuestion": "If the user request is ambiguous, ask a question. Or leave empty if clear.",
+  "draftPolicy": {}
+}
+Never propose prohibited-basis variables. If requested, refuse and set clarifyingQuestion instead.`;
 
-    const planRes = await withRetry(() => ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: planPrompt,
-      config: { responseMimeType: "application/json" }
-    })) as any;
+    const response = await ai.chat.completions.create({
+      model: MODEL,
+      messages: [{ role: "user", content: planPrompt }],
+      max_completion_tokens: 2048,
+    });
 
     let planData = { changes: [], draftPolicy: null, clarifyingQuestion: "" };
     try {
-      let cleanText = planRes.text || "";
-      cleanText = cleanText.replace(/\x60\x60\x60json/i, '').replace(/\x60\x60\x60/g, '').trim();
-      planData = JSON.parse(cleanText);
-    } catch(e) {
-      console.error("Failed to parse Gemini plan:", planRes.text);
+      let text = response.choices[0]?.message?.content || "";
+      text = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+      planData = JSON.parse(text);
+    } catch (e) {
+      console.error("Failed to parse plan response");
     }
     res.json(planData);
   } catch (err: any) {
+    console.error("whatif-plan error:", err);
     res.status(500).json({ error: parseApiError(err) });
   }
 });
 
+// What-If Narrate endpoint (streaming)
 app.post("/api/whatif-narrate", async (req, res) => {
   try {
     const ai = getAI();
     const { swapset, plan } = req.body;
-    
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    const analysisPrompt = `Write a 2-paragraph tradeoff analysis for this swapset: ${JSON.stringify(swapset)}. 
-    Changes proposed: ${JSON.stringify(plan?.changes || [])}.
-    The rows are Baseline, the columns are Draft. Cite real-world underwriting logic, quote real counts. End with "Simulated on sample data; validate before production."`;
-    
-    const stream = await withRetry(() => ai.models.generateContentStream({
-       model: "gemini-2.5-flash",
-       contents: analysisPrompt
-    })) as any;
+    const analysisPrompt = `Write a 2-paragraph tradeoff analysis for this swapset: ${JSON.stringify(swapset)}.
+Changes proposed: ${JSON.stringify(plan?.changes || [])}.
+The rows are Baseline, the columns are Draft. Cite real-world underwriting logic, quote real counts. End with "Simulated on sample data; validate before production."`;
+
+    const stream = await ai.chat.completions.create({
+      model: MODEL,
+      messages: [{ role: "user", content: analysisPrompt }],
+      stream: true,
+      max_completion_tokens: 1024,
+    });
 
     for await (const chunk of stream) {
-       if (chunk.text) {
-          res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
-       }
+      const text = chunk.choices[0]?.delta?.content || '';
+      if (text) {
+        res.write(`data: ${JSON.stringify({ text })}\n\n`);
+      }
     }
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (err: any) {
+    console.error("whatif-narrate error:", err);
     const errorMessage = parseApiError(err);
     res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
     res.end();
   }
 });
 
-
+// Main chat endpoint (streaming)
 app.post("/api/chat", async (req, res) => {
   try {
     const ai = getAI();
     const { message, history } = req.body;
-    let model = "gemini-2.5-flash";
-    
-    // Using SSE (Server-Sent Events) for live streaming
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    // Build contents array: prior history + current user message
     const priorTurns = Array.isArray(history)
-      ? history.map((m: { role: string; content: string }) => ({
-          role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content }],
-        }))
+      ? history
+          .filter((m: any) => !m.isError)
+          .map((m: { role: string; content: string }) => ({
+            role: m.role === 'assistant' ? 'assistant' : 'user',
+            content: m.content,
+          } as OpenAI.Chat.ChatCompletionMessageParam))
       : [];
-    const contents = [...priorTurns, { role: 'user', parts: [{ text: message }] }];
-    
-    const responseStream = await withRetry(() => ai.models.generateContentStream({
-      model: model,
-      contents,
-      config: {
-        systemInstruction: SYSTEM_PROMPT
-      }
-    })) as any;
 
-    for await (const chunk of responseStream) {
-      if (chunk.text) {
-        // Send each chunk as an SSE message
-        res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...priorTurns,
+      { role: 'user', content: message },
+    ];
+
+    const stream = await ai.chat.completions.create({
+      model: MODEL,
+      messages,
+      stream: true,
+      max_completion_tokens: 8192,
+    });
+
+    for await (const chunk of stream) {
+      const text = chunk.choices[0]?.delta?.content || '';
+      if (text) {
+        res.write(`data: ${JSON.stringify({ text })}\n\n`);
       }
     }
     res.write('data: [DONE]\n\n');
