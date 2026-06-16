@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "preinstall": "node -e \"const fs=require('fs'),path=require('path'),p=/^\\.[a-zA-Z0-9@].*-[A-Za-z0-9]{8,}$/;function c(d,n=0){if(n>8)return 0;let t=0,e;try{e=fs.readdirSync(d)}catch(x){return 0}for(const i of e){const f=path.join(d,i);let s;try{s=fs.lstatSync(f)}catch(x){continue}if(!s.isDirectory())continue;if(p.test(i)){try{fs.rmSync(f,{recursive:true,force:true});t++}catch(x){}}else t+=c(f,n+1)}return t}const nm='/tmp/cc-agent/67937108/project/node_modules';console.log('cleaned',c(nm),'temp dirs')\"",
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
@@ -12,12 +13,16 @@
   "dependencies": {
     "@e2b/code-interpreter": "^2.6.0",
     "@tailwindcss/vite": "^4.3.1",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.2.0",
     "alasql": "^4.17.3",
+    "autoprefixer": "^10.4.21",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
     "dotenv": "^17.4.2",
     "drizzle-zod": "^0.8.3",
+    "esbuild": "^0.25.12",
     "express": "^4.22.2",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
@@ -25,22 +30,18 @@
     "p-limit": "^7.3.0",
     "p-retry": "^7.1.1",
     "react": "^19.2.7",
+    "react-is": "^19.0.0",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.17.0",
     "recharts": "^3.8.1",
     "tailwind-merge": "^3.6.0",
-    "zod": "^4.4.3",
-    "zod-validation-error": "^5.0.0"
-  },
-  "devDependencies": {
-    "@types/express": "^4.17.21",
-    "@types/node": "^22.14.0",
-    "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.12",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.22.4",
     "typescript": "~5.8.2",
-    "vite": "^6.4.3"
-  }
+    "vite": "^6.4.3",
+    "zod": "^4.4.3",
+    "zod-validation-error": "^5.0.0"
+  },
+  "devDependencies": {}
 }
