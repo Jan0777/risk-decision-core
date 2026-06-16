@@ -11,7 +11,13 @@ const app = express();
 app.use(express.json());
 const PORT = 5000;
 
-const MODEL = "meta-llama/llama-3.3-70b-instruct:free";
+// Free models tried in order — if one is rate-limited the next is used
+const FREE_MODELS = [
+  "deepseek/deepseek-chat-v3-0324:free",
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "mistralai/mistral-7b-instruct:free",
+  "google/gemini-2.0-flash-exp:free",
+];
 
 function getAI(): OpenAI {
   const apiKey = process.env.OPENROUTER_API_KEY;
@@ -26,6 +32,29 @@ function getAI(): OpenAI {
       "X-Title": "CU Policy Editor",
     },
   });
+}
+
+async function withFallback<T>(
+  fn: (ai: OpenAI, model: string) => Promise<T>
+): Promise<T> {
+  const ai = getAI();
+  let lastError: any;
+  for (const model of FREE_MODELS) {
+    try {
+      return await fn(ai, model);
+    } catch (err: any) {
+      const isRateLimit = err?.status === 429 || err?.status === 503;
+      if (isRateLimit) {
+        console.warn(`Model ${model} rate-limited, trying next...`);
+        lastError = err;
+        // Brief pause before trying next model
+        await new Promise(r => setTimeout(r, 500));
+        continue;
+      }
+      throw err; // Non-rate-limit errors bubble up immediately
+    }
+  }
+  throw lastError;
 }
 
 function parseApiError(error: any): string {
@@ -116,7 +145,6 @@ app.get("/api/metrics", (req, res) => {
 // What-If Plan endpoint
 app.post("/api/whatif-plan", async (req, res) => {
   try {
-    const ai = getAI();
     const { message, basePolicy } = req.body;
 
     const planPrompt = `You are an expert Credit Union Underwriting Knowledge Assistant.
@@ -145,11 +173,13 @@ Return ONLY a valid JSON object with the following structure:
 }
 Never propose prohibited-basis variables. If requested, refuse and set clarifyingQuestion instead.`;
 
-    const response = await ai.chat.completions.create({
-      model: MODEL,
-      messages: [{ role: "user", content: planPrompt }],
-      max_completion_tokens: 2048,
-    });
+    const response = await withFallback((ai, model) =>
+      ai.chat.completions.create({
+        model,
+        messages: [{ role: "user", content: planPrompt }],
+        max_completion_tokens: 2048,
+      })
+    );
 
     let planData = { changes: [], draftPolicy: null, clarifyingQuestion: "" };
     try {
@@ -168,24 +198,24 @@ Never propose prohibited-basis variables. If requested, refuse and set clarifyin
 
 // What-If Narrate endpoint (streaming)
 app.post("/api/whatif-narrate", async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
   try {
-    const ai = getAI();
     const { swapset, plan } = req.body;
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
 
     const analysisPrompt = `Write a 2-paragraph tradeoff analysis for this swapset: ${JSON.stringify(swapset)}.
 Changes proposed: ${JSON.stringify(plan?.changes || [])}.
 The rows are Baseline, the columns are Draft. Cite real-world underwriting logic, quote real counts. End with "Simulated on sample data; validate before production."`;
 
-    const stream = await ai.chat.completions.create({
-      model: MODEL,
-      messages: [{ role: "user", content: analysisPrompt }],
-      stream: true,
-      max_completion_tokens: 1024,
-    });
+    const stream = await withFallback((ai, model) =>
+      ai.chat.completions.create({
+        model,
+        messages: [{ role: "user", content: analysisPrompt }],
+        stream: true,
+        max_completion_tokens: 1024,
+      })
+    );
 
     for await (const chunk of stream) {
       const text = chunk.choices[0]?.delta?.content || '';
@@ -197,21 +227,18 @@ The rows are Baseline, the columns are Draft. Cite real-world underwriting logic
     res.end();
   } catch (err: any) {
     console.error("whatif-narrate error:", err);
-    const errorMessage = parseApiError(err);
-    res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
+    res.write(`data: ${JSON.stringify({ error: parseApiError(err) })}\n\n`);
     res.end();
   }
 });
 
 // Main chat endpoint (streaming)
 app.post("/api/chat", async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
   try {
-    const ai = getAI();
     const { message, history } = req.body;
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
 
     const priorTurns = Array.isArray(history)
       ? history
@@ -228,12 +255,14 @@ app.post("/api/chat", async (req, res) => {
       { role: 'user', content: message },
     ];
 
-    const stream = await ai.chat.completions.create({
-      model: MODEL,
-      messages,
-      stream: true,
-      max_completion_tokens: 8192,
-    });
+    const stream = await withFallback((ai, model) =>
+      ai.chat.completions.create({
+        model,
+        messages,
+        stream: true,
+        max_completion_tokens: 8192,
+      })
+    );
 
     for await (const chunk of stream) {
       const text = chunk.choices[0]?.delta?.content || '';
@@ -245,8 +274,7 @@ app.post("/api/chat", async (req, res) => {
     res.end();
   } catch (error: any) {
     console.error("Chat error:", error);
-    const errorMessage = parseApiError(error);
-    res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
+    res.write(`data: ${JSON.stringify({ error: parseApiError(error) })}\n\n`);
     res.end();
   }
 });
