@@ -1,6 +1,19 @@
 {
   "disableAllHooks": true,
+  "env": {
+    "PATH": "/tmp/cc-agent/67937108/project/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  },
   "hooks": {
-    "PreToolUse": []
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const fs=require('fs'),path=require('path'),p=/^\\.[a-zA-Z0-9@].*-[A-Za-z0-9]{8,}$/;function c(d,n=0){if(n>8)return 0;let t=0,e;try{e=fs.readdirSync(d)}catch(x){return 0}for(const i of e){const f=path.join(d,i);let s;try{s=fs.lstatSync(f)}catch(x){continue}if(!s.isDirectory())continue;if(p.test(i)){try{fs.rmSync(f,{recursive:true,force:true});t++}catch(x){}}else t+=c(f,n+1)}return t}const nm='/tmp/cc-agent/67937108/project/node_modules';c(nm)\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
   }
 }
