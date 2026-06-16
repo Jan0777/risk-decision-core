@@ -1,0 +1,6 @@
+{
+  "name": "Risk Decision Core",
+  "description": "Credit Union underwriting decision workflow application with risk assessment and auto-decisioning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
