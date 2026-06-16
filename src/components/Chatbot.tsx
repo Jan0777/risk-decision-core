@@ -464,10 +464,11 @@ sys.stdout.getvalue()
         }
 
         const endpoint = '/api/chat';
+        const historyToSend = (activeConv?.messages || []).filter(m => m.role !== 'system');
         const response = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: userMsg })
+            body: JSON.stringify({ message: userMsg, history: historyToSend })
         });
         
         if (!response.ok) {
@@ -557,7 +558,6 @@ sys.stdout.getvalue()
         }
 
         const runPythonMatch = finalReply.match(/<exec_python>([\s\S]*?)<\/exec_python>/);
-        let runSandboxMatch = null;
         if (runPythonMatch) {
             finalReply = finalReply.replace(runPythonMatch[0], "").trim();
             const pythonSource = runPythonMatch[1].trim();

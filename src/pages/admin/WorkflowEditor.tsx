@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Play, FileText, UserPlus, Info, Plus, Minus, Maximize, CheckCircle, Workflow, ChevronRight, MessageSquare } from 'lucide-react';
 import { InspectorPanel } from './InspectorPanel';
 import { Gate, Policy, DecisionResult } from '../../lib/types';
@@ -28,6 +28,7 @@ export function WorkflowEditor() {
     const saved = localStorage.getItem('cu_draft_policy');
     return saved ? JSON.parse(saved) : null;
   });
+  const isSavingRef = useRef(false);
   
   // Chatbot states
   const [chatOpen, setChatOpen] = useState(() => sessionStorage.getItem('cu_dw_chat_open') === 'true');
@@ -54,12 +55,17 @@ export function WorkflowEditor() {
   }, []);
 
   useEffect(() => {
+    isSavingRef.current = true;
     localStorage.setItem('cu_base_policy', JSON.stringify(policy));
     window.dispatchEvent(new Event('policyUpdated'));
   }, [policy]);
 
   useEffect(() => {
     const handleSync = () => {
+      if (isSavingRef.current) {
+        isSavingRef.current = false;
+        return;
+      }
       const saved = localStorage.getItem('cu_base_policy');
       if (saved) {
         setPolicy(JSON.parse(saved));

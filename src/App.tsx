@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect } from 'react';
+import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AdminLayout } from './components/AdminLayout';
 import { WorkflowEditor } from './pages/admin/WorkflowEditor';
@@ -13,10 +13,6 @@ import { PerformanceDashboard } from './pages/admin/PerformanceDashboard';
 // WhatIfEditor removed
 
 export default function App() {
-  useEffect(() => {
-    localStorage.removeItem('cu_base_policy');
-    localStorage.removeItem('cu_draft_policy');
-  }, []);
 
   return (
     <BrowserRouter>

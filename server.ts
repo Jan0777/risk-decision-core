@@ -10,7 +10,7 @@ dotenv.config();
 
 const app = express();
 app.use(express.json());
-const PORT = 3000;
+const PORT = 5000;
 
 // Initialize Gemini
 let aiInstance: GoogleGenAI | null = null;
@@ -200,17 +200,26 @@ app.post("/api/whatif-narrate", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
   try {
     const ai = getAI();
-    const { message } = req.body;
+    const { message, history } = req.body;
     let model = "gemini-2.5-flash";
     
     // Using SSE (Server-Sent Events) for live streaming
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+
+    // Build contents array: prior history + current user message
+    const priorTurns = Array.isArray(history)
+      ? history.map((m: { role: string; content: string }) => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: m.content }],
+        }))
+      : [];
+    const contents = [...priorTurns, { role: 'user', parts: [{ text: message }] }];
     
     const responseStream = await withRetry(() => ai.models.generateContentStream({
       model: model,
-      contents: message,
+      contents,
       config: {
         systemInstruction: SYSTEM_PROMPT
       }
