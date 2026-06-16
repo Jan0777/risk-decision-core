@@ -26,6 +26,33 @@ function getAI(): GoogleGenAI {
   return aiInstance;
 }
 
+function parseApiError(error: any): string {
+  const status = error.status;
+  const raw = error.message || '';
+
+  // Gemini wraps errors as nested JSON strings — unwrap them
+  try {
+    const outer = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || '');
+    const innerStr = outer?.error?.message ?? '';
+    try {
+      const inner = JSON.parse(innerStr);
+      if (inner?.error?.message) return inner.error.message;
+    } catch {}
+    if (innerStr) return innerStr;
+  } catch {}
+
+  if (status === 429 || raw.includes('429') || raw.includes('quota')) {
+    return 'API quota exceeded. Please wait a moment and try again.';
+  }
+  if (status === 503 || raw.includes('503') || raw.includes('high demand') || raw.includes('UNAVAILABLE')) {
+    return 'Gemini is temporarily experiencing high demand. Please try again in a few seconds.';
+  }
+  if (status === 401 || raw.includes('401') || raw.includes('API_KEY') || raw.includes('API key')) {
+    return 'Invalid or missing API key. Please check your GEMINI_API_KEY configuration.';
+  }
+  return raw || 'An unexpected error occurred. Please try again.';
+}
+
 async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
   try {
     return await fn();
@@ -157,7 +184,7 @@ app.post("/api/whatif-plan", async (req, res) => {
     }
     res.json(planData);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: parseApiError(err) });
   }
 });
 
@@ -187,11 +214,8 @@ app.post("/api/whatif-narrate", async (req, res) => {
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (err: any) {
-    let errorMessage = err.message;
-    if (errorMessage?.includes("429") || errorMessage?.includes("quota")) {
-      errorMessage = "Analysis unavailable due to API rate limits.";
-    }
-    res.write(`data: ${JSON.stringify({ error: true, text: "\\n\\n[Notice: " + errorMessage + "]" })}\n\n`);
+    const errorMessage = parseApiError(err);
+    res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
     res.end();
   }
 });
@@ -234,12 +258,8 @@ app.post("/api/chat", async (req, res) => {
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (error: any) {
-    let errorMessage = error.message;
-    if (errorMessage?.includes("429") || errorMessage?.includes("quota")) {
-      errorMessage = "You have exceeded your Gemini API Free Tier quota. Please wait a few seconds and try again, or check your billing plan.";
-    } else {
-      console.error("Chat error:", error);
-    }
+    console.error("Chat error:", error);
+    const errorMessage = parseApiError(error);
     res.write(`data: ${JSON.stringify({ error: errorMessage })}\n\n`);
     res.end();
   }

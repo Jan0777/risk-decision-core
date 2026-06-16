@@ -505,11 +505,11 @@ sys.stdout.getvalue()
                             break;
                         }
                         try {
-                            console.log("Chatbot received dataStr:", dataStr);
                             const dataObj = JSON.parse(dataStr);
                             if (dataObj.error) {
                                 ConversationStore.updateMessage(activeConvId, tempMsgId, { 
-                                    content: "Error: " + dataObj.error
+                                    content: dataObj.error,
+                                    isError: true
                                 });
                                 loadData();
                                 done = true;
@@ -578,7 +578,8 @@ sys.stdout.getvalue()
         ConversationStore.appendMessage(activeConvId, {
             id: 'err_' + Date.now(),
             role: 'assistant',
-            content: "I'm sorry, I encountered an error. " + err.message
+            content: err.message || 'An unexpected error occurred. Please try again.',
+            isError: true
         });
         loadData();
     }
@@ -1432,14 +1433,23 @@ sys.stdout.getvalue()
                     ) : (
                        messages.map((msg, i) => (
                          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                           {msg.role === 'assistant' && <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center mt-1 mr-2 shrink-0"><Bot className="w-3.5 h-3.5"/></div>}
+                           {msg.role === 'assistant' && !msg.isError && <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center mt-1 mr-2 shrink-0"><Bot className="w-3.5 h-3.5"/></div>}
+                           {msg.isError && <div className="w-6 h-6 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mt-1 mr-2 shrink-0 text-xs font-bold">!</div>}
                            
+                           {msg.isError ? (
+                             <div className="max-w-[90%] rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-[13px] text-rose-800 shadow-sm">
+                               <p className="font-semibold text-rose-700 mb-0.5 text-xs uppercase tracking-wider">Error</p>
+                               <p>{msg.content}</p>
+                               <p className="text-[11px] text-rose-500 mt-1.5">Please try again, or wait a moment if this is a rate limit issue.</p>
+                             </div>
+                           ) : (
                            <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-[14px] ${msg.role === 'user' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white border border-slate-200 text-slate-800 shadow-sm'}`}>
                              <div className={`markdown-body ${msg.role === 'user' ? '!text-white' : ''}`}>
                                  <Markdown>{msg.content}</Markdown>
                              </div>
                              <ProposalCard msg={msg} />
                            </div>
+                           )}
                          </div>
                        ))
                     )}

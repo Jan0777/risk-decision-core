@@ -4,6 +4,7 @@ export interface Message {
   content: string;
   createdAt: number;
   proposal?: any;
+  isError?: boolean;
 }
 
 export interface Conversation {
