@@ -11,12 +11,12 @@ const app = express();
 app.use(express.json());
 const PORT = 5000;
 
-// Free models tried in order — if one fails the next is used automatically
+// Primary model with automatic fallbacks — verified live from OpenRouter API
 const FREE_MODELS = [
-  "meta-llama/llama-3.3-70b-instruct:free",
-  "google/gemini-2.0-flash-exp:free",
-  "qwen/qwen3-235b-a22b:free",
-  "mistralai/mistral-7b-instruct:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",   // 120B params, 1M context (user selected)
+  "meta-llama/llama-3.3-70b-instruct:free",   // Llama 3.3 70B
+  "nousresearch/hermes-3-llama-3.1-405b:free", // Hermes 3 405B
+  "openrouter/free",                           // Auto-router: always finds something available
 ];
 
 function getAI(): OpenAI {
