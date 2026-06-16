@@ -255,14 +255,19 @@ app.post("/api/chat", async (req, res) => {
       { role: 'user', content: message },
     ];
 
-    const stream = await withFallback((ai, model) =>
-      ai.chat.completions.create({
+    let usedModel = FREE_MODELS[0];
+    const stream = await withFallback((ai, model) => {
+      usedModel = model;
+      return ai.chat.completions.create({
         model,
         messages,
         stream: true,
         max_completion_tokens: 8192,
-      })
-    );
+      });
+    });
+
+    // Send the model name as the first event so the UI can display it
+    res.write(`data: ${JSON.stringify({ model: usedModel })}\n\n`);
 
     for await (const chunk of stream) {
       const text = chunk.choices[0]?.delta?.content || '';

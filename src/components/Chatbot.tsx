@@ -515,6 +515,11 @@ sys.stdout.getvalue()
                                 done = true;
                                 break;
                             }
+                            if (dataObj.model) {
+                                ConversationStore.updateMessage(activeConvId, tempMsgId, {
+                                    model: dataObj.model
+                                });
+                            }
                             
                             // Ensure we have a string and it's not the string "undefined"
                             const newText = dataObj.text;
@@ -1443,11 +1448,21 @@ sys.stdout.getvalue()
                                <p className="text-[11px] text-rose-500 mt-1.5">Please try again, or wait a moment if this is a rate limit issue.</p>
                              </div>
                            ) : (
-                           <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-[14px] ${msg.role === 'user' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white border border-slate-200 text-slate-800 shadow-sm'}`}>
-                             <div className={`markdown-body ${msg.role === 'user' ? '!text-white' : ''}`}>
-                                 <Markdown>{msg.content}</Markdown>
+                           <div className="max-w-[85%] flex flex-col gap-1">
+                             <div className={`rounded-2xl px-4 py-3 text-[14px] ${msg.role === 'user' ? 'bg-indigo-600 text-white shadow-md' : 'bg-white border border-slate-200 text-slate-800 shadow-sm'}`}>
+                               <div className={`markdown-body ${msg.role === 'user' ? '!text-white' : ''}`}>
+                                   <Markdown>{msg.content}</Markdown>
+                               </div>
+                               <ProposalCard msg={msg} />
                              </div>
-                             <ProposalCard msg={msg} />
+                             {msg.role === 'assistant' && msg.model && (
+                               <div className="flex items-center gap-1 pl-1">
+                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-[10px] text-slate-400 font-mono leading-none">
+                                   <svg className="w-2.5 h-2.5 text-emerald-400" fill="currentColor" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>
+                                   {msg.model.split('/').pop()?.replace(':free', '')}
+                                 </span>
+                               </div>
+                             )}
                            </div>
                            )}
                          </div>
