@@ -290,6 +290,322 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CORRIDOR SIMULATION ENGINE  (server-side, single source of truth)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface SimParams {
+  creditScoreMin: number;
+  dtiMax: number;
+  ltvMax: number;
+  maxInquiries: number;
+  maxVehicleAge: number;
+  maxDpd30: number;
+  allowChargeOffs: boolean;
+}
+
+interface SimMetrics {
+  total: number;
+  approvals: number;
+  denials: number;
+  reviews: number;
+  approvalRate: number;
+  denialRate: number;
+  reviewRate: number;
+  estimatedDefaultRate: number;
+  reasonCodeBreakdown: Record<string, number>;
+}
+
+interface SwapsetMigration { from: string; to: string; count: number; }
+
+const BASELINE_PARAMS: SimParams = {
+  creditScoreMin: 620,
+  dtiMax: 0.45,
+  ltvMax: 1.25,
+  maxInquiries: 8,
+  maxVehicleAge: 12,
+  maxDpd30: 2,
+  allowChargeOffs: false,
+};
+
+function buildDataset(n = 10000): any[] {
+  const out: any[] = [];
+  for (let i = 0; i < n; i++) {
+    const score = Math.floor(480 + Math.random() * 380);
+    const nonScoreable = Math.random() > 0.95;
+    out.push({
+      id: i,
+      custom_score: nonScoreable ? null : score,
+      num_bankruptcies: Math.random() > 0.95 ? 1 : 0,
+      repossessions: Math.random() > 0.97 ? 1 : 0,
+      charge_offs: Math.random() > 0.93 ? 1 : 0,
+      num_inquiries: Math.floor(Math.random() * 11),
+      projected_di: 0.08 + Math.random() * 0.62,
+      age_of_vehicle: Math.floor(Math.random() * 16),
+      ltv_ratio: 0.65 + Math.random() * 0.85,
+      dpd30_24m: Math.random() > 0.78 ? Math.floor(Math.random() * 4) : 0,
+    });
+  }
+  return out;
+}
+
+// Generated once at startup — shared across all requests
+const SIM_APPLICANTS = buildDataset();
+
+function simEval(app: any, p: SimParams): { decision: string; reason: string } {
+  if (app.num_bankruptcies > 0) return { decision: 'DENY', reason: 'bankruptcy' };
+  if (app.repossessions > 0)    return { decision: 'DENY', reason: 'prior_repossession' };
+  if (!p.allowChargeOffs && app.charge_offs > 0) return { decision: 'DENY', reason: 'charge_off' };
+  if (app.age_of_vehicle > p.maxVehicleAge)       return { decision: 'DENY', reason: 'vehicle_age' };
+  if (app.custom_score === null) return { decision: 'REVIEW', reason: 'non_scoreable' };
+
+  const fails: string[] = [];
+  if (app.custom_score < p.creditScoreMin)  fails.push('below_min_score');
+  if (app.projected_di > p.dtiMax)          fails.push('dti_exceeded');
+  if (app.ltv_ratio > p.ltvMax)             fails.push('ltv_exceeded');
+  if (app.num_inquiries > p.maxInquiries)   fails.push('excessive_inquiries');
+  if (app.dpd30_24m > p.maxDpd30)          fails.push('delinquency_history');
+
+  if (fails.length === 0) return { decision: 'APPROVE', reason: 'passed_all' };
+  // Single soft fail → REVIEW; multiple → DENY
+  return { decision: fails.length === 1 ? 'REVIEW' : 'DENY', reason: fails[0] };
+}
+
+function runSim(p: SimParams): SimMetrics & { decisions: string[] } {
+  let approvals = 0, denials = 0, reviews = 0;
+  let highRiskApproved = 0;
+  const rc: Record<string, number> = {};
+  const decisions: string[] = [];
+
+  for (const app of SIM_APPLICANTS) {
+    const { decision, reason } = simEval(app, p);
+    decisions.push(decision);
+    if (decision === 'APPROVE') {
+      approvals++;
+      if ((app.custom_score || 999) < 660 && app.projected_di > 0.36) highRiskApproved++;
+    } else {
+      if (decision === 'DENY') denials++; else reviews++;
+      if (reason && reason !== 'passed_all') rc[reason] = (rc[reason] || 0) + 1;
+    }
+  }
+
+  const total = SIM_APPLICANTS.length;
+  return {
+    total, approvals, denials, reviews,
+    approvalRate: parseFloat((approvals / total * 100).toFixed(2)),
+    denialRate: parseFloat((denials / total * 100).toFixed(2)),
+    reviewRate: parseFloat((reviews / total * 100).toFixed(2)),
+    estimatedDefaultRate: approvals > 0 ? parseFloat((highRiskApproved / approvals * 100).toFixed(2)) : 0,
+    reasonCodeBreakdown: rc,
+    decisions,
+  };
+}
+
+function computeSwapset(baseDec: string[], draftDec: string[]) {
+  const counts: Record<string, Record<string, number>> = {};
+  for (let i = 0; i < baseDec.length; i++) {
+    const b = baseDec[i], d = draftDec[i];
+    if (b !== d) {
+      counts[b] = counts[b] || {};
+      counts[b][d] = (counts[b][d] || 0) + 1;
+    }
+  }
+  const migrations: SwapsetMigration[] = [];
+  for (const [from, tos] of Object.entries(counts)) {
+    for (const [to, count] of Object.entries(tos)) {
+      migrations.push({ from, to, count });
+    }
+  }
+  return migrations;
+}
+
+// POST /api/shadow-run  — single simulation against the backend dataset
+app.post("/api/shadow-run", (req, res) => {
+  try {
+    const { params: overrides } = req.body;
+    const params: SimParams = { ...BASELINE_PARAMS, ...overrides };
+    const baseResult = runSim(BASELINE_PARAMS);
+    const draftResult = runSim(params);
+    const migrations = computeSwapset(baseResult.decisions, draftResult.decisions);
+
+    res.json({
+      metrics: {
+        approvals: draftResult.approvals, denials: draftResult.denials,
+        reviews: draftResult.reviews, total: draftResult.total,
+        approvalRate: draftResult.approvalRate, denialRate: draftResult.denialRate,
+        reviewRate: draftResult.reviewRate,
+        estimatedDefaultRate: draftResult.estimatedDefaultRate,
+        reasonCodeBreakdown: draftResult.reasonCodeBreakdown,
+      },
+      baselineMetrics: {
+        approvals: baseResult.approvals, denials: baseResult.denials,
+        reviews: baseResult.reviews, total: baseResult.total,
+        approvalRate: baseResult.approvalRate,
+        estimatedDefaultRate: baseResult.estimatedDefaultRate,
+      },
+      swapset: {
+        baseline_distribution: { approve: baseResult.approvals, deny: baseResult.denials, manual: baseResult.reviews },
+        new_distribution: { approve: draftResult.approvals, deny: draftResult.denials, manual: draftResult.reviews },
+        migrations,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/drill-loop  — autonomous goal-directed optimization loop (SSE)
+app.post("/api/drill-loop", async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const send = (obj: any) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  try {
+    const { goal = '', constraintManifest = {}, baselineParamOverrides = {} } = req.body;
+
+    const baseParams: SimParams = { ...BASELINE_PARAMS, ...baselineParamOverrides };
+    const baseResult = runSim(baseParams);
+
+    send({ type: 'baseline', metrics: { approvalRate: baseResult.approvalRate, estimatedDefaultRate: baseResult.estimatedDefaultRate } });
+
+    // Candidate configurations to explore (8 iterations)
+    const candidates = [
+      { tag: 'Conservative_A',  risk: 'LOW',      p: { ...baseParams, creditScoreMin: baseParams.creditScoreMin - 10 } },
+      { tag: 'Conservative_B',  risk: 'LOW',      p: { ...baseParams, dtiMax: baseParams.dtiMax + 0.02 } },
+      { tag: 'Balanced_A',      risk: 'MODERATE', p: { ...baseParams, creditScoreMin: baseParams.creditScoreMin - 15, dtiMax: baseParams.dtiMax + 0.02 } },
+      { tag: 'Balanced_B',      risk: 'MODERATE', p: { ...baseParams, dtiMax: baseParams.dtiMax + 0.03, maxInquiries: baseParams.maxInquiries + 1 } },
+      { tag: 'Balanced_C',      risk: 'MODERATE', p: { ...baseParams, creditScoreMin: baseParams.creditScoreMin - 20, ltvMax: baseParams.ltvMax + 0.05 } },
+      { tag: 'Aggressive_A',    risk: 'HIGH',     p: { ...baseParams, creditScoreMin: baseParams.creditScoreMin - 25, dtiMax: baseParams.dtiMax + 0.04 } },
+      { tag: 'Aggressive_B',    risk: 'HIGH',     p: { ...baseParams, dtiMax: baseParams.dtiMax + 0.05, ltvMax: baseParams.ltvMax + 0.08, maxInquiries: baseParams.maxInquiries + 2 } },
+      { tag: 'Aggressive_C',    risk: 'HIGH',     p: { ...baseParams, creditScoreMin: baseParams.creditScoreMin - 30, dtiMax: baseParams.dtiMax + 0.03 } },
+    ];
+
+    const scored: any[] = [];
+
+    for (let i = 0; i < candidates.length; i++) {
+      const cand = candidates[i];
+      await new Promise(r => setTimeout(r, 80));
+
+      const draftResult = runSim(cand.p);
+      const migrations = computeSwapset(baseResult.decisions, draftResult.decisions);
+
+      const approvalLift = draftResult.approvalRate - baseResult.approvalRate;
+      const defaultDelta = Math.max(0, draftResult.estimatedDefaultRate - baseResult.estimatedDefaultRate);
+      const thresholdChurn = Math.abs(cand.p.creditScoreMin - baseParams.creditScoreMin) * 0.01
+                           + Math.abs(cand.p.dtiMax - baseParams.dtiMax) * 8;
+      const score = approvalLift - defaultDelta * 3 - thresholdChurn;
+
+      const paramDiff: Record<string, any> = {};
+      for (const key of Object.keys(cand.p) as (keyof SimParams)[]) {
+        if (cand.p[key] !== baseParams[key]) {
+          paramDiff[key] = { before: baseParams[key], after: cand.p[key] };
+        }
+      }
+
+      const violations: string[] = [];
+      // Hard floor — never go below 600 minimum score (regulatory floor)
+      if (cand.p.creditScoreMin < 600) violations.push('score_below_600_hard_floor');
+      // Soft cap — informational badge, doesn't kill config scoring
+      const maxDefaultRate = constraintManifest?.maxDefaultRate;
+      if (maxDefaultRate && draftResult.estimatedDefaultRate > maxDefaultRate) {
+        violations.push(`est_default_${draftResult.estimatedDefaultRate.toFixed(1)}%_above_${maxDefaultRate}%_target`);
+      }
+
+      // Only HARD violations suppress a config (score = -999)
+      const hasHardViolation = violations.some(v => v.includes('hard_floor'));
+      // Soft cap violations just add a penalty to the score but still surface the config
+      const softPenalty = violations.filter(v => v.includes('_above_')).length * 2;
+
+      scored.push({
+        tag: cand.tag, riskLevel: cand.risk,
+        params: cand.p, paramDiff,
+        metrics: {
+          approvals: draftResult.approvals, denials: draftResult.denials,
+          reviews: draftResult.reviews, total: draftResult.total,
+          approvalRate: draftResult.approvalRate, estimatedDefaultRate: draftResult.estimatedDefaultRate,
+          denialRate: draftResult.denialRate, reviewRate: draftResult.reviewRate,
+          reasonCodeBreakdown: draftResult.reasonCodeBreakdown,
+        },
+        score: hasHardViolation ? -999 : score - softPenalty,
+        constraintViolations: violations,
+        swapset: {
+          baseline_distribution: { approve: baseResult.approvals, deny: baseResult.denials, manual: baseResult.reviews },
+          new_distribution: { approve: draftResult.approvals, deny: draftResult.denials, manual: draftResult.reviews },
+          migrations,
+        },
+      });
+
+      send({
+        type: 'iteration',
+        iteration: i + 1,
+        maxIterations: candidates.length,
+        tag: cand.tag,
+        riskLevel: cand.risk,
+        approvalLift: approvalLift.toFixed(2),
+        score: hasHardViolation ? -999 : parseFloat((score - softPenalty).toFixed(3)),
+        constraintViolations: violations,
+      });
+    }
+
+    // Pick best from each risk tier — prefer no-hard-violation configs, fallback to all sorted by score
+    const withoutHard = scored.filter(r => r.score > -999).sort((a, b) => b.score - a.score);
+    const pool = withoutHard.length >= 3 ? withoutHard : scored.sort((a, b) => b.score - a.score);
+    const pick = (tier: string) => pool.find(r => r.riskLevel === tier);
+    let topThree = [pick('LOW'), pick('MODERATE'), pick('HIGH')].filter(Boolean) as any[];
+    if (topThree.length < 3) {
+      for (const r of pool) {
+        if (!topThree.includes(r) && topThree.length < 3) topThree.push(r);
+      }
+    }
+    topThree = topThree.slice(0, 3);
+    const labels = ['Conservative', 'Balanced', 'Aggressive'];
+    topThree.forEach((r, i) => { r.label = labels[i]; });
+
+    // AI headline for the results
+    let headline = '';
+    try {
+      const ctx = topThree.map(r => ({
+        label: r.label,
+        approvalLift: `+${(r.metrics.approvalRate - baseResult.approvalRate).toFixed(1)}%`,
+        defaultRate: `${r.metrics.estimatedDefaultRate}%`,
+        changes: Object.entries(r.paramDiff).map(([k, v]: any) => {
+          const isRate = k === 'dtiMax' || k === 'ltvMax';
+          const fmt = (n: number | boolean) => isRate && typeof n === 'number' ? `${(n * 100).toFixed(0)}%` : String(n);
+          return `${k}: ${fmt(v.before)} → ${fmt(v.after)}`;
+        }).join(', '),
+      }));
+
+      const headlineRes = await withFallback((ai, model) =>
+        ai.chat.completions.create({
+          model,
+          messages: [{
+            role: 'user',
+            content: `You are a Credit Union policy analyst. User goal: "${goal}". 
+Simulation results (${candidates.length} iterations run): ${JSON.stringify(ctx)}
+Write exactly 2 sentences: (1) What the analysis found overall. (2) Which configuration is recommended and why, citing specific numbers. Be concrete. No filler.`
+          }],
+          max_completion_tokens: 160,
+        })
+      );
+      headline = headlineRes.choices[0]?.message?.content || '';
+    } catch {
+      const best = topThree[1] || topThree[0];
+      if (best) {
+        headline = `Ran ${candidates.length} simulations against 10,000 synthetic applicants. The ${best.label} configuration delivers +${(best.metrics.approvalRate - baseResult.approvalRate).toFixed(1)}% approval lift while keeping estimated default rate at ${best.metrics.estimatedDefaultRate}%.`;
+      }
+    }
+
+    send({ type: 'complete', results: topThree, iterationsRun: candidates.length, baselineMetrics: { approvals: baseResult.approvals, denials: baseResult.denials, reviews: baseResult.reviews, total: baseResult.total, approvalRate: baseResult.approvalRate, estimatedDefaultRate: baseResult.estimatedDefaultRate }, headline });
+    res.end();
+  } catch (err: any) {
+    console.error('drill-loop error:', err);
+    send({ type: 'error', message: parseApiError(err) });
+    res.end();
+  }
+});
+
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

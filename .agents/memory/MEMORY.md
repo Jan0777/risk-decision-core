@@ -1,0 +1,3 @@
+- [Drill loop scoring](drill-loop-scoring.md) — Soft cap violations (maxDefaultRate) add score penalty only; hard floor (creditScoreMin < 600) suppresses configs (-999). Baseline-already-exceeds-cap must not kill all configs.
+- [Sim engine baseline](sim-engine-baseline.md) — BASELINE_PARAMS: creditScoreMin=620, dtiMax=0.45, ltvMax=1.25, maxInquiries=8, maxVehicleAge=12, maxDpd30=2. Dataset is 10k synthetic, generated once at startup (SIM_APPLICANTS module-level).
+- [Analytical routing](analytical-routing.md) — Chatbot keyword regex decides chat vs drill loop. Drill loop uses SSE; chat uses streaming text. Both in handleSend().

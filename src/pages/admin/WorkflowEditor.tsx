@@ -34,7 +34,7 @@ export function WorkflowEditor() {
   const [chatOpen, setChatOpen] = useState(() => sessionStorage.getItem('cu_dw_chat_open') === 'true');
   const [chatExpanded, setChatExpanded] = useState(() => {
     const val = sessionStorage.getItem('cu_dw_chat_expanded');
-    return val !== null ? val === 'true' : false;
+    return val !== null ? val === 'true' : true;
   });
   const [showComparison, setShowComparison] = useState(true);
 
